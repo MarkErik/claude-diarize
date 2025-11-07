@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import numpy as np
 import os
+import argparse
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -886,20 +887,62 @@ def run_comparison_test(audio_path: str, hf_token: str, output_dir: str = "resul
 # ============================================================================
 
 if __name__ == "__main__":
-    # Configuration
-    AUDIO_FILE = "audioC-PT.mp3"  # Replace with your audio file
-    HF_TOKEN = os.getenv("HF_TOKEN")  # Read from .env file
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Compare Granite Speech and Whisper diarization pipelines",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python diarization_test.py audio_file.mp3
+  python diarization_test.py /path/to/audio.wav --output custom_results
+  python diarization_test.py interview.mp3 --help
+        """
+    )
+    
+    parser.add_argument(
+        "audio_file",
+        help="Path to the audio file to process (MP3, WAV, etc.)"
+    )
+    
+    parser.add_argument(
+        "--output",
+        "-o",
+        default="diarization_comparison",
+        help="Output directory for results (default: diarization_comparison)"
+    )
+    
+    parser.add_argument(
+        "--token",
+        "-t",
+        help="HuggingFace token (can also be set via HF_TOKEN environment variable)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Check if audio file exists
+    if not os.path.exists(args.audio_file):
+        print(f"Error: Audio file '{args.audio_file}' not found.")
+        exit(1)
+    
+    # Get HuggingFace token from command line or environment
+    HF_TOKEN = args.token or os.getenv("HF_TOKEN")
     
     if not HF_TOKEN:
-        print("Error: HF_TOKEN not found in environment variables.")
-        print("Please create a .env file with your HuggingFace token:")
-        print("HF_TOKEN=your_huggingface_token_here")
-        print("You can get your token from: https://huggingface.co/settings/tokens")
+        print("Error: HF_TOKEN not found.")
+        print("Please provide your HuggingFace token via:")
+        print("  1. Command line: --token your_token_here")
+        print("  2. Environment variable: HF_TOKEN=your_token_here")
+        print("  3. .env file: HF_TOKEN=your_token_here")
+        print("\nYou can get your token from: https://huggingface.co/settings/tokens")
         exit(1)
     
     # Run comparison
+    print(f"Processing audio file: {args.audio_file}")
+    print(f"Output directory: {args.output}")
+    print()
+    
     granite_results, pipeline_results = run_comparison_test(
-        audio_path=AUDIO_FILE,
+        audio_path=args.audio_file,
         hf_token=HF_TOKEN,
-        output_dir="diarization_comparison"
+        output_dir=args.output
     )
