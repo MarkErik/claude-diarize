@@ -12,3 +12,6 @@ wheels/
 
 # Outputs
 diarization_comparison/
+
+# Files
+*.mp3
