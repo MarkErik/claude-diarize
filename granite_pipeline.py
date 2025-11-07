@@ -73,11 +73,27 @@ class GraniteSpeechDiarizer:
             import subprocess
             subprocess.check_call(["pip", "install", "peft"])
         
-        self.granite_model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id
-        ).to(self.device)
-        
         self.granite_processor = AutoProcessor.from_pretrained(model_id)
+        
+        # Load model with better MPS handling
+        print(f"Loading Granite Speech model on {self.device}...")
+        try:
+            self.granite_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16 if self.device == "mps" else torch.float32
+            ).to(self.device)
+            
+            # Enable gradient checkpointing for memory efficiency on MPS
+            if self.device == "mps":
+                self.granite_model.gradient_checkpointing_enable()
+                
+        except Exception as e:
+            print(f"Failed to load model on {self.device}: {e}")
+            print("Falling back to CPU...")
+            self.device = "cpu"
+            self.granite_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                model_id
+            ).to(self.device)
         
         # Load pyannote community-1 for diarization
         print("Loading pyannote community-1 diarization pipeline...")
@@ -102,9 +118,19 @@ class GraniteSpeechDiarizer:
         self.alignment_processor = Wav2Vec2Processor.from_pretrained(
             "facebook/wav2vec2-large-960h-lv60-self"
         )
-        self.alignment_model = Wav2Vec2ForCTC.from_pretrained(
-            "facebook/wav2vec2-large-960h-lv60-self"
-        ).to(self.device)
+        
+        # Load alignment model with MPS handling
+        try:
+            self.alignment_model = Wav2Vec2ForCTC.from_pretrained(
+                "facebook/wav2vec2-large-960h-lv60-self",
+                torch_dtype=torch.float16 if self.device == "mps" else torch.float32
+            ).to(self.device)
+        except Exception as e:
+            print(f"Failed to load alignment model on {self.device}: {e}")
+            print("Falling back to CPU for alignment model...")
+            self.alignment_model = Wav2Vec2ForCTC.from_pretrained(
+                "facebook/wav2vec2-large-960h-lv60-self"
+            ).to("cpu")
         
     def transcribe_and_diarize(self, audio_path: str) -> List[Dict]:
         """
@@ -212,21 +238,52 @@ class GraniteSpeechDiarizer:
             return_tensors="pt"
         )
         
+        # Ensure all inputs are on the correct device
+        model_inputs = {k: v.to(self.device) for k, v in model_inputs.items()}
+        
         with torch.no_grad():
-            model_outputs = self.granite_model.generate(
-                **model_inputs,
-                max_new_tokens=200,
-                num_beams=4,
-                do_sample=False,
-                min_length=1,
-                top_p=1.0,
-                repetition_penalty=3.0,
-                length_penalty=1.0,
-                temperature=1.0,
-                bos_token_id=self.granite_processor.tokenizer.bos_token_id,
-                eos_token_id=self.granite_processor.tokenizer.eos_token_id,
-                pad_token_id=self.granite_processor.tokenizer.pad_token_id,
-            )
+            try:
+                model_outputs = self.granite_model.generate(
+                    **model_inputs,
+                    max_new_tokens=200,
+                    num_beams=4,
+                    do_sample=False,
+                    min_length=1,
+                    top_p=1.0,
+                    repetition_penalty=3.0,
+                    length_penalty=1.0,
+                    temperature=1.0,
+                    bos_token_id=self.granite_processor.tokenizer.bos_token_id,
+                    eos_token_id=self.granite_processor.tokenizer.eos_token_id,
+                    pad_token_id=self.granite_processor.tokenizer.pad_token_id,
+                )
+            except RuntimeError as e:
+                if "MPS" in str(e) or "metal" in str(e).lower():
+                    print(f"MPS error encountered: {e}")
+                    print("Falling back to CPU for transcription...")
+                    # Move model and inputs to CPU
+                    self.granite_model.to("cpu")
+                    model_inputs = {k: v.to("cpu") for k, v in model_inputs.items()}
+                    
+                    model_outputs = self.granite_model.generate(
+                        **model_inputs,
+                        max_new_tokens=200,
+                        num_beams=4,
+                        do_sample=False,
+                        min_length=1,
+                        top_p=1.0,
+                        repetition_penalty=3.0,
+                        length_penalty=1.0,
+                        temperature=1.0,
+                        bos_token_id=self.granite_processor.tokenizer.bos_token_id,
+                        eos_token_id=self.granite_processor.tokenizer.eos_token_id,
+                        pad_token_id=self.granite_processor.tokenizer.pad_token_id,
+                    )
+                    
+                    # Move model back to original device
+                    self.granite_model.to(self.device)
+                else:
+                    raise e
         
         # Decode transcription
         num_input_tokens = model_inputs["input_ids"].shape[-1]
