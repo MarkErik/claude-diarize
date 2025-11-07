@@ -74,10 +74,8 @@ class GraniteSpeechDiarizer:
             subprocess.check_call(["pip", "install", "peft"])
         
         self.granite_model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            device_map=self.device,
-            torch_dtype=torch.float16  # MPS supports float16
-        )
+            model_id
+        ).to(self.device)
         
         self.granite_processor = AutoProcessor.from_pretrained(model_id)
         
@@ -106,8 +104,7 @@ class GraniteSpeechDiarizer:
         )
         self.alignment_model = Wav2Vec2ForCTC.from_pretrained(
             "facebook/wav2vec2-large-960h-lv60-self"
-        )
-        self.alignment_model.to(self.device)
+        ).to(self.device)
         
     def transcribe_and_diarize(self, audio_path: str) -> List[Dict]:
         """
@@ -140,13 +137,7 @@ class GraniteSpeechDiarizer:
         # Save raw transcription output
         self._save_output(transcript_text, "granite_raw_transcription.json")
         
-        # Clear audio from memory
-        del wav
-        gc.collect()
-        if self.device == "mps":
-            torch.mps.empty_cache()
-        elif self.device == "cuda":
-            torch.cuda.empty_cache()
+        # Let Python handle cleanup naturally
         
         # Step 2: Forced alignment for precise word timestamps
         print("Step 2: Performing forced alignment...")
@@ -155,12 +146,7 @@ class GraniteSpeechDiarizer:
         # Save forced alignment results
         self._save_output(words_with_timestamps, "granite_forced_alignment.json")
         
-        # Clear memory after alignment
-        gc.collect()
-        if self.device == "mps":
-            torch.mps.empty_cache()
-        elif self.device == "cuda":
-            torch.cuda.empty_cache()
+        # Let Python handle cleanup naturally
         
         # Step 3: Diarization with pyannote community-1
         print("Step 3: Running speaker diarization...")
@@ -178,9 +164,7 @@ class GraniteSpeechDiarizer:
                 'speaker': speaker
             })
         
-        # Clear diarization object
-        del diarization
-        gc.collect()
+        # Let Python handle cleanup naturally
         
         # Step 4: Merge with intelligent boundary handling
         print("Step 4: Merging with boundary resolution...")
@@ -192,12 +176,7 @@ class GraniteSpeechDiarizer:
         # Save merged results
         self._save_output(merged_results, "granite_merged_results.json")
         
-        # Final cleanup
-        gc.collect()
-        if self.device == "mps":
-            torch.mps.empty_cache()
-        elif self.device == "cuda":
-            torch.cuda.empty_cache()
+        # Let Python handle cleanup naturally
         
         # Step 5: Smooth speaker transitions
         print("Step 5: Smoothing speaker transitions...")
@@ -227,18 +206,26 @@ class GraniteSpeechDiarizer:
         )
         
         model_inputs = self.granite_processor(
-            prompt, 
-            wav, 
-            device=self.device, 
+            prompt,
+            wav,
+            device=self.device,
             return_tensors="pt"
-        ).to(self.device)
+        )
         
         with torch.no_grad():
             model_outputs = self.granite_model.generate(
                 **model_inputs,
-                max_new_tokens=2048,
+                max_new_tokens=200,
+                num_beams=4,
                 do_sample=False,
-                num_beams=1
+                min_length=1,
+                top_p=1.0,
+                repetition_penalty=3.0,
+                length_penalty=1.0,
+                temperature=1.0,
+                bos_token_id=self.granite_processor.tokenizer.bos_token_id,
+                eos_token_id=self.granite_processor.tokenizer.eos_token_id,
+                pad_token_id=self.granite_processor.tokenizer.pad_token_id,
             )
         
         # Decode transcription
@@ -250,12 +237,8 @@ class GraniteSpeechDiarizer:
             skip_special_tokens=True
         )[0]
         
-        # CRITICAL: Clear memory immediately after use
-        del model_inputs, model_outputs, new_tokens
-        if self.device == "mps":
-            torch.mps.empty_cache()
-        elif self.device == "cuda":
-            torch.cuda.empty_cache()
+        # Let Python's garbage collection handle cleanup naturally
+        # Avoid forced cache clearing to prevent memory fragmentation
         
         return transcript_text.strip()
     
@@ -296,13 +279,7 @@ class GraniteSpeechDiarizer:
                 })
                 current_time += word_duration
             
-            # CRITICAL: Clear temporary data
-            del inputs, logits, audio
-            gc.collect()
-            if self.device == "mps":
-                torch.mps.empty_cache()
-            elif self.device == "cuda":
-                torch.cuda.empty_cache()
+            # Let Python handle cleanup naturally
             
             return words_with_timestamps
             
@@ -325,8 +302,7 @@ class GraniteSpeechDiarizer:
                     'confidence': 0.7
                 })
             
-            del audio
-            gc.collect()
+            # Let Python handle cleanup naturally
             
             return words_with_timestamps
     
