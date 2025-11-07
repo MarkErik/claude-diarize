@@ -19,3 +19,5 @@ outputs/
 .DS_Store
 .env
 .github/copilot-instructions.md
+*.wav
+
