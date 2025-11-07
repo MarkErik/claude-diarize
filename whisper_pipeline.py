@@ -51,10 +51,11 @@ class WhisperPipelineDiarizer:
         # 2. Pyannote for diarization
         from pyannote.audio import Pipeline
         
-        print("Loading pyannote diarization pipeline...")
+        # Load pyannote community-1 for diarization
+        print("Loading pyannote community-1 diarization pipeline...")
         self.diarization_pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=self.hf_token
+            "pyannote/speaker-diarization-community-1",
+            token=hf_token
         )
         
         if torch.cuda.is_available():
