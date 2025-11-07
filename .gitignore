@@ -15,3 +15,4 @@ diarization_comparison/
 
 # Files
 *.mp3
+.DS_Store

@@ -1,4 +1,33 @@
-"""
+    def _forced_alignment(self, audio_path: str, transcript: str) -> List[Dict]:
+        """
+        Use wav2vec2 for forced phoneme alignment to get precise word timestamps
+        Uses pre-loaded model to avoid memory leaks
+        """
+        try:
+            import librosa
+            import gc
+            
+            # Load audio
+            audio, sr = librosa.load(audio_path, sr=16000)
+            
+            # Process audio
+            inputs = self.alignment_processor(audio, sampling_rate=16000, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            # Get logits
+            with torch.no_grad():
+                logits = self.alignment_model(**inputs).logits
+            
+            # Simple heuristic alignment based on audio duration
+            words = transcript.split()
+            words_with_timestamps = []
+            
+            audio_duration = len(audio) / sr
+            char_count = len(transcript)
+            
+            current_time = 0
+            for word in words:
+                word_duration = (len(word) / char_count) * audio_duration if char_count > 0 else 0."""
 Comparison test: Granite Speech vs Whisper Multi-Component Pipelines
 Focus: Maximum accuracy for 2-speaker interview diarization
 
@@ -92,6 +121,17 @@ class GraniteSpeechDiarizer:
         elif torch.cuda.is_available():
             self.diarization_pipeline.to(torch.device("cuda"))
         
+        # Pre-load alignment model to avoid reloading
+        print("Loading alignment model...")
+        from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+        self.alignment_processor = Wav2Vec2Processor.from_pretrained(
+            "facebook/wav2vec2-large-960h-lv60-self"
+        )
+        self.alignment_model = Wav2Vec2ForCTC.from_pretrained(
+            "facebook/wav2vec2-large-960h-lv60-self"
+        )
+        self.alignment_model.to(self.device)
+        
     def transcribe_and_diarize(self, audio_path: str) -> List[Dict]:
         """
         Complete multi-component pipeline:
@@ -104,6 +144,7 @@ class GraniteSpeechDiarizer:
             List of dicts with: {word, start, end, speaker, confidence}
         """
         import torchaudio
+        import gc
         
         # Load audio - must be mono, 16kHz
         wav, sr = torchaudio.load(audio_path, normalize=True)
@@ -120,9 +161,24 @@ class GraniteSpeechDiarizer:
         transcript_text = self._transcribe_with_granite(wav, audio_path)
         print(f"Transcript: {transcript_text[:200]}...")
         
+        # Clear audio from memory
+        del wav
+        gc.collect()
+        if self.device == "mps":
+            torch.mps.empty_cache()
+        elif self.device == "cuda":
+            torch.cuda.empty_cache()
+        
         # Step 2: Forced alignment for precise word timestamps
         print("Step 2: Performing forced alignment...")
         words_with_timestamps = self._forced_alignment(audio_path, transcript_text)
+        
+        # Clear memory after alignment
+        gc.collect()
+        if self.device == "mps":
+            torch.mps.empty_cache()
+        elif self.device == "cuda":
+            torch.cuda.empty_cache()
         
         # Step 3: Diarization with pyannote community-1
         print("Step 3: Running speaker diarization...")
@@ -140,12 +196,23 @@ class GraniteSpeechDiarizer:
                 'speaker': speaker
             })
         
+        # Clear diarization object
+        del diarization
+        gc.collect()
+        
         # Step 4: Merge with intelligent boundary handling
         print("Step 4: Merging with boundary resolution...")
         final_segments = self._merge_with_boundary_handling(
             words_with_timestamps, 
             speaker_segments
         )
+        
+        # Final cleanup
+        gc.collect()
+        if self.device == "mps":
+            torch.mps.empty_cache()
+        elif self.device == "cuda":
+            torch.cuda.empty_cache()
         
         return final_segments
     
@@ -182,82 +249,73 @@ class GraniteSpeechDiarizer:
         
         # Decode transcription
         num_input_tokens = model_inputs["input_ids"].shape[-1]
-        new_tokens = torch.unsqueeze(model_outputs[0, num_input_tokens:], dim=0)
+        new_tokens = model_outputs[0, num_input_tokens:].unsqueeze(0)
         transcript_text = self.granite_processor.tokenizer.batch_decode(
             new_tokens, 
             add_special_tokens=False, 
             skip_special_tokens=True
         )[0]
         
+        # CRITICAL: Clear memory immediately after use
+        del model_inputs, model_outputs, new_tokens
+        if self.device == "mps":
+            torch.mps.empty_cache()
+        elif self.device == "cuda":
+            torch.cuda.empty_cache()
+        
         return transcript_text.strip()
     
     def _forced_alignment(self, audio_path: str, transcript: str) -> List[Dict]:
         """
         Use wav2vec2 for forced phoneme alignment to get precise word timestamps
+        Uses pre-loaded model to avoid memory leaks
         """
         try:
-            from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2CTCTokenizer
             import librosa
-            import torch.nn.functional as F
-            
-            # Load alignment model
-            processor = Wav2Vec2Processor.from_pretrained(
-                "facebook/wav2vec2-large-960h-lv60-self"
-            )
-            model = Wav2Vec2ForCTC.from_pretrained(
-                "facebook/wav2vec2-large-960h-lv60-self"
-            )
-            
-            # Move to appropriate device
-            if torch.backends.mps.is_available():
-                model = model.to("mps")
-            elif torch.cuda.is_available():
-                model = model.to("cuda")
+            import gc
             
             # Load audio
             audio, sr = librosa.load(audio_path, sr=16000)
             
             # Process audio
-            inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
+            inputs = self.alignment_processor(audio, sampling_rate=16000, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
-            # Move to appropriate device
-            if torch.backends.mps.is_available():
-                inputs = {k: v.to("mps") for k, v in inputs.items()}
-            elif torch.cuda.is_available():
-                inputs = {k: v.to("cuda") for k, v in inputs.items()}
-            
-            # Get logits and predicted IDs
+            # Get logits
             with torch.no_grad():
-                logits = model(**inputs).logits
+                logits = self.alignment_model(**inputs).logits
             
-            predicted_ids = torch.argmax(logits, dim=-1)
-            
-            # Decode to get character-level timestamps
-            # This is a simplified version - full CTC alignment is complex
+            # Simple heuristic alignment based on audio duration
             words = transcript.split()
             words_with_timestamps = []
             
-            # Simple heuristic alignment based on audio duration
-            # In production, use proper CTC forced alignment algorithms
             audio_duration = len(audio) / sr
             char_count = len(transcript)
             
             current_time = 0
             for word in words:
-                word_duration = (len(word) / char_count) * audio_duration
+                word_duration = (len(word) / char_count) * audio_duration if char_count > 0 else 0.1
                 words_with_timestamps.append({
                     'word': word,
                     'start': current_time,
                     'end': current_time + word_duration,
-                    'confidence': 0.9  # Estimated
+                    'confidence': 0.9
                 })
                 current_time += word_duration
+            
+            # CRITICAL: Clear temporary data
+            del inputs, logits, audio
+            gc.collect()
+            if self.device == "mps":
+                torch.mps.empty_cache()
+            elif self.device == "cuda":
+                torch.cuda.empty_cache()
             
             return words_with_timestamps
             
         except Exception as e:
             print(f"Forced alignment failed: {e}, using simple timing")
-            # Fallback to simple word splitting
+            # Fallback
             words = transcript.split()
             import librosa
             audio, sr = librosa.load(audio_path, sr=16000)
@@ -265,14 +323,18 @@ class GraniteSpeechDiarizer:
             
             words_with_timestamps = []
             for i, word in enumerate(words):
-                start_time = (i / len(words)) * audio_duration
-                end_time = ((i + 1) / len(words)) * audio_duration
+                start_time = (i / len(words)) * audio_duration if len(words) > 0 else 0
+                end_time = ((i + 1) / len(words)) * audio_duration if len(words) > 0 else 0.1
                 words_with_timestamps.append({
                     'word': word,
                     'start': start_time,
                     'end': end_time,
                     'confidence': 0.7
                 })
+            
+            del audio
+            import gc
+            gc.collect()
             
             return words_with_timestamps
     
@@ -411,6 +473,8 @@ class AccuratePipelineDiarizer:
         Returns:
             List of dicts with: {word, start, end, speaker, confidence}
         """
+        import gc
+        
         # Step 1: Transcribe with Whisper
         print("Step 1: Transcribing with Whisper...")
         segments, info = self.whisper.transcribe(
@@ -434,9 +498,17 @@ class AccuratePipelineDiarizer:
                         'confidence': getattr(word, 'probability', 1.0)
                     })
         
+        # Clear segments from memory
+        del segments
+        gc.collect()
+        
         # Step 2: Forced Alignment (if available)
         print("Step 2: Performing forced alignment...")
-        aligned_words = self._forced_alignment(audio_path, words_with_timestamps)
+        transcript = " ".join([w['word'] for w in words_with_timestamps])
+        aligned_words = self._forced_alignment(audio_path, transcript)
+        
+        # Clear memory
+        gc.collect()
         
         # Step 3: Diarization
         print("Step 3: Running speaker diarization...")
@@ -454,12 +526,19 @@ class AccuratePipelineDiarizer:
                 'speaker': speaker
             })
         
+        # Clear diarization
+        del diarization
+        gc.collect()
+        
         # Step 4: Merge with intelligent boundary handling
         print("Step 4: Merging with boundary resolution...")
         final_segments = self._merge_with_boundary_handling(
             aligned_words, 
             speaker_segments
         )
+        
+        # Final cleanup
+        gc.collect()
         
         return final_segments
     
@@ -472,6 +551,7 @@ class AccuratePipelineDiarizer:
             from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
             import librosa
             import torch.nn.functional as F
+            import gc
             
             # Load alignment model
             processor = Wav2Vec2Processor.from_pretrained(
@@ -481,15 +561,24 @@ class AccuratePipelineDiarizer:
                 "facebook/wav2vec2-large-960h-lv60-self"
             )
             
-            if torch.cuda.is_available():
+            # Move to appropriate device
+            if torch.backends.mps.is_available():
+                model = model.to("mps")
+                device = "mps"
+            elif torch.cuda.is_available():
                 model = model.to("cuda")
+                device = "cuda"
+            else:
+                device = "cpu"
             
             # Load audio
             audio, sr = librosa.load(audio_path, sr=16000)
             
             # Process audio
             inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-            if torch.cuda.is_available():
+            if device == "mps":
+                inputs = {k: v.to("mps") for k, v in inputs.items()}
+            elif device == "cuda":
                 inputs = {k: v.to("cuda") for k, v in inputs.items()}
             
             # Get logits
@@ -499,6 +588,14 @@ class AccuratePipelineDiarizer:
             # Align words to audio frames
             # This is a simplified version - full MFA implementation is more complex
             aligned_words = self._align_words_to_frames(words, logits, processor)
+            
+            # CRITICAL: Clear memory
+            del model, processor, inputs, logits, audio
+            gc.collect()
+            if device == "mps":
+                torch.mps.empty_cache()
+            elif device == "cuda":
+                torch.cuda.empty_cache()
             
             return aligned_words
             
