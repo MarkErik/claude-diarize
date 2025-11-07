@@ -18,3 +18,4 @@ outputs/
 *.mp3
 .DS_Store
 .env
+.github/copilot-instructions.md
