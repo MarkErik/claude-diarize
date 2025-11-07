@@ -65,26 +65,29 @@ class WhisperPipelineDiarizer:
         import os
         
         print("Loading Whisper large-v3...")
-        # faster_whisper handles device internally
+        # faster_whisper handles device internally. On Apple Silicon, 'cpu' with float32/16 uses Accelerate/Metal underneath.
         if self.device == "cuda":
             device_str = "cuda"
-            compute_type = "float16"
-            num_workers = 1  # GPU uses single worker
+            compute_type = "float16"  # Mixed precision for speed & memory
         else:
-            device_str = "cpu"
-            compute_type = "float32"
-            # For Apple Silicon (and other multi-core CPUs), use multiple workers
-            # Get CPU count, reserve 1-2 cores for system
-            cpu_count = os.cpu_count() or 4
-            num_workers = max(1, cpu_count - 2) if self.device == "mps" else max(1, cpu_count - 1)
-            print(f"Optimizing for multi-core CPU: using {num_workers} workers")
-            
+            device_str = "cpu"  # faster-whisper does not take 'mps'; it will use optimized backends
+            # Prefer float16 if supported for a balance of speed & accuracy; fallback to float32.
+            compute_type = "float16"
+        
+        # Derive high parallelism settings for long 1–1.5h interviews on M3 Ultra
+        cpu_count = os.cpu_count() or 8
+        # Reserve a couple of cores for OS/background tasks
+        cpu_threads = max(4, cpu_count - 4)
+        # num_workers governs parallel segment decoding; start modest to avoid memory spikes
+        dynamic_num_workers = 4 if cpu_count >= 16 else 2
+        print(f"Configured cpu_threads={cpu_threads}, num_workers={dynamic_num_workers}, compute_type={compute_type}")
+
         self.whisper = WhisperModel(
             "large-v3",
             device=device_str,
             compute_type=compute_type,
-            cpu_threads=num_workers if device_str == "cpu" else 0,
-            num_workers=1  # Number of parallel transcription workers (set to 1 for sequential processing)
+            cpu_threads=cpu_threads if device_str == "cpu" else 0,
+            num_workers=dynamic_num_workers
         )
         
         # 2. Pyannote for diarization
@@ -137,25 +140,26 @@ class WhisperPipelineDiarizer:
         
         # Step 1: Transcribe with Whisper
         print("Step 1: Transcribing with Whisper...")
+        # Accuracy-focused decoding parameters:
+        # - Higher beam_size improves transcription accuracy for long-form speech.
+        # - best_of is mainly used with sampling (temperature>0); kept for potential fallback.
+        # - condition_on_previous_text preserves context across long interviews without chunking.
+        # NOTE: faster-whisper does not support 'batch_size' in transcribe(); removed.
         segments, info = self.whisper.transcribe(
             audio_path,
             word_timestamps=True,
-            language="en",  # Adjust as needed
-            beam_size=5,
+            language="en",  # Adjust as needed or set None for auto-detect
+            beam_size=6,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
-            # Multi-core optimization: process audio in batches
-            # Larger batch size = better CPU utilization on multi-core systems
-            batch_size=16 if self.device == "cpu" else 8,
-            # Use all available threads for decoding
-            best_of=5,  # Number of candidates when sampling
-            patience=1.0,  # Beam search patience factor
+            vad_parameters=dict(min_silence_duration_ms=400),  # Slightly lower to catch shorter turn breaks
+            best_of=5,
+            patience=1.2,  # Allow a bit more exploration for accuracy
             length_penalty=1.0,
-            temperature=0.0,  # Deterministic output (no sampling)
+            temperature=0.0,  # Deterministic decoding
             compression_ratio_threshold=2.4,
             log_prob_threshold=-1.0,
             no_speech_threshold=0.6,
-            condition_on_previous_text=True,  # Better context for longer audio
+            condition_on_previous_text=True,
         )
         
         # Extract word-level transcription
