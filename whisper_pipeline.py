@@ -40,10 +40,31 @@ class WhisperPipelineDiarizer:
     - Reserves 1-2 cores for system operations
     """
     
-    def __init__(self, hf_token: str, output_dir: str = "outputs"):
+    def __init__(
+        self,
+        hf_token: str,
+        output_dir: str = "outputs",
+        # Decoding controls (tuned for accuracy on long interviews)
+        beam_size: int = 6,
+        best_of: int = 5,
+        patience: float = 1.2,
+        length_penalty: float = 1.0,
+        temperature: float = 0.0,
+        vad_min_silence_ms: int = 400,
+        # Parallelism cap (optional overrides)
+        max_num_workers: int | None = None,
+    ):
         self.hf_token = hf_token
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        # Store decoding/parallelism preferences
+        self.beam_size = beam_size
+        self.best_of = best_of
+        self.patience = patience
+        self.length_penalty = length_penalty
+        self.temperature = temperature
+        self.vad_min_silence_ms = vad_min_silence_ms
+        self.max_num_workers = max_num_workers
         
         # Determine device
         if torch.backends.mps.is_available():
@@ -65,29 +86,37 @@ class WhisperPipelineDiarizer:
         import os
         
         print("Loading Whisper large-v3...")
-        # faster_whisper handles device internally. On Apple Silicon, 'cpu' with float32/16 uses Accelerate/Metal underneath.
+        # faster-whisper handles device internally. On Apple Silicon, use device='cpu'.
         if self.device == "cuda":
             device_str = "cuda"
             compute_type = "float16"  # Mixed precision for speed & memory
         else:
-            device_str = "cpu"  # faster-whisper does not take 'mps'; it will use optimized backends
-            # Prefer float16 if supported for a balance of speed & accuracy; fallback to float32.
+            device_str = "cpu"
+            # Prefer float16 on Apple Silicon for a good accuracy/speed balance (falls back if unsupported)
             compute_type = "float16"
-        
-        # Derive high parallelism settings for long 1–1.5h interviews on M3 Ultra
-        cpu_count = os.cpu_count() or 8
-        # Reserve a couple of cores for OS/background tasks
-        cpu_threads = max(4, cpu_count - 4)
-        # num_workers governs parallel segment decoding; start modest to avoid memory spikes
-        dynamic_num_workers = 4 if cpu_count >= 16 else 2
-        print(f"Configured cpu_threads={cpu_threads}, num_workers={dynamic_num_workers}, compute_type={compute_type}")
+
+        # Balanced threading: avoid oversubscription by splitting cores across workers.
+        total_cores = os.cpu_count() or 8
+        reserve = 4  # leave some headroom for OS/IO
+        usable = max(2, total_cores - reserve)
+        # Choose workers based on total cores; cap if user requested
+        default_workers = 2 if usable < 12 else 4 if usable < 24 else 6
+        dynamic_num_workers = default_workers
+        if self.max_num_workers is not None:
+            dynamic_num_workers = max(1, min(self.max_num_workers, 8))
+        # Threads per worker (integer floor)
+        cpu_threads_per_worker = max(2, usable // max(1, dynamic_num_workers))
+        print(
+            f"Parallelism config: total_cores={total_cores}, workers={dynamic_num_workers}, "
+            f"cpu_threads_per_worker={cpu_threads_per_worker}, compute_type={compute_type}"
+        )
 
         self.whisper = WhisperModel(
             "large-v3",
             device=device_str,
             compute_type=compute_type,
-            cpu_threads=cpu_threads if device_str == "cpu" else 0,
-            num_workers=dynamic_num_workers
+            cpu_threads=cpu_threads_per_worker if device_str == "cpu" else 0,
+            num_workers=dynamic_num_workers,
         )
         
         # 2. Pyannote for diarization
@@ -136,6 +165,14 @@ class WhisperPipelineDiarizer:
         
         Returns:
             List of dicts with: {word, start, end, speaker, confidence}
+        Performance/accuracy tuning notes:
+        - beam_size: Raising above 6 (e.g. 8–10) improves accuracy but increases latency.
+        - patience: >1.2 allows beam search to explore longer; diminishing returns past ~1.4.
+        - num_workers: Increased in init; raising further can cause memory pressure even with 512GB when CPU cache/memory bandwidth becomes the bottleneck.
+        - cpu_threads_per_worker: Computed dynamically; keep >=2 to avoid context switching overhead.
+        - compute_type float16: Good trade-off; if you observe numerical instability, set compute_type to 'float32'.
+        - vad_min_silence_ms: Lower (<350) may fragment continuous speech; raise (>600) if speakers have long reflective pauses.
+        - For extremely long audio (>2h), consider periodic checkpointing of intermediate JSON outputs to mitigate risk of interruption.
         """
         
         # Step 1: Transcribe with Whisper
@@ -149,13 +186,13 @@ class WhisperPipelineDiarizer:
             audio_path,
             word_timestamps=True,
             language="en",  # Adjust as needed or set None for auto-detect
-            beam_size=6,
+            beam_size=self.beam_size,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=400),  # Slightly lower to catch shorter turn breaks
-            best_of=5,
-            patience=1.2,  # Allow a bit more exploration for accuracy
-            length_penalty=1.0,
-            temperature=0.0,  # Deterministic decoding
+            vad_parameters=dict(min_silence_duration_ms=self.vad_min_silence_ms),  # Catch shorter turn breaks
+            best_of=self.best_of,
+            patience=self.patience,  # Allow a bit more exploration for accuracy
+            length_penalty=self.length_penalty,
+            temperature=self.temperature,  # Deterministic decoding by default
             compression_ratio_threshold=2.4,
             log_prob_threshold=-1.0,
             no_speech_threshold=0.6,
