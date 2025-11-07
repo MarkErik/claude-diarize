@@ -33,6 +33,11 @@ class WhisperPipelineDiarizer:
     4. Intelligent merging with boundary handling
     
     Includes automatic output saving at each processing step.
+    
+    Multi-core optimizations for Apple Silicon:
+    - Uses cpu_threads parameter to leverage all available cores
+    - Optimized batch_size for parallel processing
+    - Reserves 1-2 cores for system operations
     """
     
     def __init__(self, hf_token: str, output_dir: str = "outputs"):
@@ -57,20 +62,29 @@ class WhisperPipelineDiarizer:
         """Initialize all pipeline components"""
         # 1. Whisper for transcription
         from faster_whisper import WhisperModel
+        import os
         
         print("Loading Whisper large-v3...")
         # faster_whisper handles device internally
         if self.device == "cuda":
             device_str = "cuda"
             compute_type = "float16"
+            num_workers = 1  # GPU uses single worker
         else:
             device_str = "cpu"
             compute_type = "float32"
+            # For Apple Silicon (and other multi-core CPUs), use multiple workers
+            # Get CPU count, reserve 1-2 cores for system
+            cpu_count = os.cpu_count() or 4
+            num_workers = max(1, cpu_count - 2) if self.device == "mps" else max(1, cpu_count - 1)
+            print(f"Optimizing for multi-core CPU: using {num_workers} workers")
             
         self.whisper = WhisperModel(
             "large-v3",
             device=device_str,
-            compute_type=compute_type
+            compute_type=compute_type,
+            cpu_threads=num_workers if device_str == "cpu" else 0,
+            num_workers=1  # Number of parallel transcription workers (set to 1 for sequential processing)
         )
         
         # 2. Pyannote for diarization
@@ -129,7 +143,19 @@ class WhisperPipelineDiarizer:
             language="en",  # Adjust as needed
             beam_size=5,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500)
+            vad_parameters=dict(min_silence_duration_ms=500),
+            # Multi-core optimization: process audio in batches
+            # Larger batch size = better CPU utilization on multi-core systems
+            batch_size=16 if self.device == "cpu" else 8,
+            # Use all available threads for decoding
+            best_of=5,  # Number of candidates when sampling
+            patience=1.0,  # Beam search patience factor
+            length_penalty=1.0,
+            temperature=0.0,  # Deterministic output (no sampling)
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
+            condition_on_previous_text=True,  # Better context for longer audio
         )
         
         # Extract word-level transcription
