@@ -145,18 +145,23 @@ class WhisperPipelineDiarizer:
         self.alignment_processor = Wav2Vec2Processor.from_pretrained(
             "facebook/wav2vec2-large-960h-lv60-self"
         )
-        
-        # Load alignment model with MPS handling
+
+        # Choose dtype: prefer float16 only on CUDA; use float32 for MPS/CPU to avoid dtype mismatches
+        model_dtype = torch.float16 if self.device == "cuda" else torch.float32
+
         try:
+            # transformers supports `torch_dtype` for faster loading when available
             self.alignment_model = Wav2Vec2ForCTC.from_pretrained(
                 "facebook/wav2vec2-large-960h-lv60-self",
-                dtype=torch.float16 if self.device == "mps" else torch.float32
+                torch_dtype=model_dtype
             ).to(self.device)
         except Exception as e:
             print(f"Failed to load alignment model on {self.device}: {e}")
             print("Falling back to CPU for alignment model...")
+            # Fallback to CPU with float32
             self.alignment_model = Wav2Vec2ForCTC.from_pretrained(
-                "facebook/wav2vec2-large-960h-lv60-self"
+                "facebook/wav2vec2-large-960h-lv60-self",
+                torch_dtype=torch.float32
             ).to("cpu")
     
     def transcribe_and_diarize(self, audio_path: str) -> List[Dict]:
@@ -324,8 +329,21 @@ class WhisperPipelineDiarizer:
             
             # Process audio
             inputs = self.alignment_processor(audio, sampling_rate=16000, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            
+
+            # Move tensors to model device and cast floating tensors to the model's dtype
+            model_param_dtype = next(self.alignment_model.parameters()).dtype
+
+            def _to_device_and_dtype(tensor):
+                if isinstance(tensor, torch.Tensor):
+                    # Cast floating tensors to model dtype (e.g., float16 on CUDA)
+                    if tensor.dtype.is_floating_point:
+                        return tensor.to(self.device, dtype=model_param_dtype)
+                    else:
+                        return tensor.to(self.device)
+                return tensor
+
+            inputs = {k: _to_device_and_dtype(v) for k, v in inputs.items()}
+
             # Get logits
             with torch.no_grad():
                 logits = self.alignment_model(**inputs).logits
@@ -407,6 +425,10 @@ class WhisperPipelineDiarizer:
                 if overlap_duration > max_overlap:
                     max_overlap = overlap_duration
                     assigned_speaker = spk_seg['speaker']
+
+            # If no speaker was selected (all overlaps zero), pick the speaker with maximum overlap (may be 0)
+            if assigned_speaker is None and overlaps:
+                assigned_speaker = max(overlaps.items(), key=lambda kv: kv[1])[0]
             
             # Strategy 2: If word spans multiple speakers equally, use midpoint
             if len(overlaps) > 1:
