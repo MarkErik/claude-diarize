@@ -48,7 +48,16 @@ class GraniteSpeechDiarizer:
         print("Loading Granite Speech 3.3-8B...")
         model_id = "ibm-granite/granite-speech-3.3-8b"
         
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Use MPS for Apple Silicon, CUDA for NVIDIA, CPU as fallback
+        if torch.backends.mps.is_available():
+            self.device = "mps"
+            print("Using Apple Silicon GPU (MPS)")
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+            print("Using NVIDIA GPU (CUDA)")
+        else:
+            self.device = "cpu"
+            print("Using CPU")
         
         # Install peft if needed
         try:
@@ -61,7 +70,7 @@ class GraniteSpeechDiarizer:
         self.granite_model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id,
             device_map=self.device,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32
+            torch_dtype=torch.float16  # MPS supports float16
         )
         
         self.granite_processor = AutoProcessor.from_pretrained(model_id)
@@ -73,7 +82,14 @@ class GraniteSpeechDiarizer:
             token=hf_token
         )
         
-        if torch.cuda.is_available():
+        # Move to appropriate device
+        if torch.backends.mps.is_available():
+            # MPS support for pyannote (if available)
+            try:
+                self.diarization_pipeline.to(torch.device("mps"))
+            except:
+                print("Note: pyannote may not fully support MPS, using CPU for diarization")
+        elif torch.cuda.is_available():
             self.diarization_pipeline.to(torch.device("cuda"))
         
     def transcribe_and_diarize(self, audio_path: str) -> List[Dict]:
@@ -192,7 +208,10 @@ class GraniteSpeechDiarizer:
                 "facebook/wav2vec2-large-960h-lv60-self"
             )
             
-            if torch.cuda.is_available():
+            # Move to appropriate device
+            if torch.backends.mps.is_available():
+                model = model.to("mps")
+            elif torch.cuda.is_available():
                 model = model.to("cuda")
             
             # Load audio
@@ -200,7 +219,11 @@ class GraniteSpeechDiarizer:
             
             # Process audio
             inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-            if torch.cuda.is_available():
+            
+            # Move to appropriate device
+            if torch.backends.mps.is_available():
+                inputs = {k: v.to("mps") for k, v in inputs.items()}
+            elif torch.cuda.is_available():
                 inputs = {k: v.to("cuda") for k, v in inputs.items()}
             
             # Get logits and predicted IDs
