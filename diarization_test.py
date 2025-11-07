@@ -25,6 +25,11 @@ import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 import numpy as np
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ============================================================================
 # OPTION A: GRANITE SPEECH 3.3-8B
@@ -882,8 +887,15 @@ def run_comparison_test(audio_path: str, hf_token: str, output_dir: str = "resul
 
 if __name__ == "__main__":
     # Configuration
-    AUDIO_FILE = ""  # Replace with your audio file
-    HF_TOKEN = ""  # Get from https://huggingface.co/settings/tokens
+    AUDIO_FILE = "audioC-PT.mp3"  # Replace with your audio file
+    HF_TOKEN = os.getenv("HF_TOKEN")  # Read from .env file
+    
+    if not HF_TOKEN:
+        print("Error: HF_TOKEN not found in environment variables.")
+        print("Please create a .env file with your HuggingFace token:")
+        print("HF_TOKEN=your_huggingface_token_here")
+        print("You can get your token from: https://huggingface.co/settings/tokens")
+        exit(1)
     
     # Run comparison
     granite_results, pipeline_results = run_comparison_test(
