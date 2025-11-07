@@ -18,13 +18,23 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, NamedTuple
 
 # Import the new pipeline modules
 from granite_pipeline import GraniteSpeechDiarizer
 from whisper_pipeline import WhisperPipelineDiarizer
 from combined_pipeline import CombinedGraniteWhisperDiarizer
 from comparison_logic import run_comparison_test, DiarizationEvaluator
+
+
+class PipelineConfig(NamedTuple):
+    """Configuration shared across all pipeline functions."""
+    audio_path: str
+    hf_token: str
+    output_dir: str
+    formats: List[str]
+    num_speakers: int = 2
+    min_confidence: float = 0.5
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -118,13 +128,10 @@ Output Formats:
         help="Minimum confidence threshold for boundary cases (default: 0.5)"
     )
     
-    # Set default number of speakers to 2
-    parser.set_defaults(num_speakers=2)
-    
     return parser.parse_args()
 
 
-def validate_arguments(args: argparse.Namespace) -> bool:
+def validate_arguments(args: argparse.Namespace) -> tuple[bool, List[str]]:
     """
     Validate command-line arguments and check for common issues.
     
@@ -132,19 +139,19 @@ def validate_arguments(args: argparse.Namespace) -> bool:
         args: Parsed command-line arguments
         
     Returns:
-        bool: True if valid, False otherwise
+        tuple[bool, List[str]]: (is_valid, parsed_formats)
     """
     # Check if audio file exists
     if not os.path.exists(args.audio_file):
         print(f"❌ Error: Audio file '{args.audio_file}' not found.")
-        return False
+        return False, []
     
     # Check if audio file is readable
     if not os.access(args.audio_file, os.R_OK):
         print(f"❌ Error: Audio file '{args.audio_file}' is not readable.")
-        return False
+        return False, []
     
-    # Validate output formats
+    # Validate and parse output formats
     valid_formats = {"json", "txt", "srt"}
     requested_formats = [f.strip().lower() for f in args.formats.split(",")]
     invalid_formats = set(requested_formats) - valid_formats
@@ -152,9 +159,9 @@ def validate_arguments(args: argparse.Namespace) -> bool:
     if invalid_formats:
         print(f"❌ Error: Invalid output format(s): {', '.join(invalid_formats)}")
         print(f"Valid formats are: {', '.join(valid_formats)}")
-        return False
+        return False, []
     
-    return True
+    return True, requested_formats
 
 
 def get_huggingface_token(args: argparse.Namespace) -> Optional[str]:
@@ -291,20 +298,12 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def run_granite_pipeline(
-    audio_path: str, 
-    hf_token: str, 
-    output_dir: str,
-    formats: List[str]
-) -> bool:
+def run_granite_pipeline(config: PipelineConfig) -> bool:
     """
     Run the Granite Speech pipeline.
     
     Args:
-        audio_path: Path to audio file
-        hf_token: HuggingFace token
-        output_dir: Output directory
-        formats: List of output formats
+        config: Pipeline configuration object
         
     Returns:
         bool: True if successful, False otherwise
@@ -314,17 +313,17 @@ def run_granite_pipeline(
     
     try:
         # Initialize pipeline
-        diarizer = GraniteSpeechDiarizer(hf_token, output_dir)
+        diarizer = GraniteSpeechDiarizer(config.hf_token, config.output_dir)
         
         # Run transcription and diarization
-        results = diarizer.transcribe_and_diarize(audio_path)
+        results = diarizer.transcribe_and_diarize(config.audio_path)
         
         if not results:
             print("❌ Granite pipeline produced no results.")
             return False
         
         # Save formatted outputs
-        success = save_formatted_outputs(results, output_dir, "granite", formats)
+        success = save_formatted_outputs(results, config.output_dir, "granite", config.formats)
         
         if success:
             print(f"\n✅ Granite pipeline completed successfully!")
@@ -351,20 +350,12 @@ def run_granite_pipeline(
         return False
 
 
-def run_whisper_pipeline(
-    audio_path: str, 
-    hf_token: str, 
-    output_dir: str,
-    formats: List[str]
-) -> bool:
+def run_whisper_pipeline(config: PipelineConfig) -> bool:
     """
     Run the Whisper pipeline.
     
     Args:
-        audio_path: Path to audio file
-        hf_token: HuggingFace token
-        output_dir: Output directory
-        formats: List of output formats
+        config: Pipeline configuration object
         
     Returns:
         bool: True if successful, False otherwise
@@ -374,17 +365,17 @@ def run_whisper_pipeline(
     
     try:
         # Initialize pipeline
-        diarizer = WhisperPipelineDiarizer(hf_token, output_dir)
+        diarizer = WhisperPipelineDiarizer(config.hf_token, config.output_dir)
         
         # Run transcription and diarization
-        results = diarizer.transcribe_and_diarize(audio_path)
+        results = diarizer.transcribe_and_diarize(config.audio_path)
         
         if not results:
             print("❌ Whisper pipeline produced no results.")
             return False
         
         # Save formatted outputs
-        success = save_formatted_outputs(results, output_dir, "whisper", formats)
+        success = save_formatted_outputs(results, config.output_dir, "whisper", config.formats)
         
         if success:
             print(f"\n✅ Whisper pipeline completed successfully!")
@@ -411,24 +402,12 @@ def run_whisper_pipeline(
         return False
 
 
-def run_combined_pipeline(
-    audio_path: str,
-    hf_token: str,
-    output_dir: str,
-    formats: List[str],
-    num_speakers: int = 2,
-    min_confidence: float = 0.5
-) -> bool:
+def run_combined_pipeline(config: PipelineConfig) -> bool:
     """
     Run the combined Granite-Whisper pipeline.
     
     Args:
-        audio_path: Path to audio file
-        hf_token: HuggingFace token
-        output_dir: Output directory
-        formats: List of output formats
-        num_speakers: Number of speakers to detect
-        min_confidence: Minimum confidence threshold
+        config: Pipeline configuration object
         
     Returns:
         bool: True if successful, False otherwise
@@ -439,21 +418,21 @@ def run_combined_pipeline(
     try:
         # Initialize pipeline
         diarizer = CombinedGraniteWhisperDiarizer(
-            hf_token,
-            output_dir,
-            num_speakers=num_speakers,
-            min_confidence_threshold=min_confidence
+            config.hf_token,
+            config.output_dir,
+            num_speakers=config.num_speakers,
+            min_confidence_threshold=config.min_confidence
         )
         
         # Run transcription and diarization
-        results = diarizer.transcribe_and_diarize(audio_path)
+        results = diarizer.transcribe_and_diarize(config.audio_path)
         
         if not results:
             print("❌ Combined pipeline produced no results.")
             return False
         
         # Save formatted outputs
-        success = save_formatted_outputs(results, output_dir, "combined", formats)
+        success = save_formatted_outputs(results, config.output_dir, "combined", config.formats)
         
         if success:
             print(f"\n✅ Combined pipeline completed successfully!")
@@ -485,20 +464,12 @@ def run_combined_pipeline(
         return False
 
 
-def run_comparison_mode(
-    audio_path: str,
-    hf_token: str,
-    output_dir: str,
-    formats: List[str]
-) -> bool:
+def run_comparison_mode(config: PipelineConfig) -> bool:
     """
     Run comparison between all pipelines.
     
     Args:
-        audio_path: Path to audio file
-        hf_token: HuggingFace token
-        output_dir: Output directory
-        formats: List of output formats
+        config: Pipeline configuration object
         
     Returns:
         bool: True if successful, False otherwise
@@ -508,16 +479,16 @@ def run_comparison_mode(
     
     try:
         # Run individual pipelines
-        granite_success = run_granite_pipeline(audio_path, hf_token, output_dir, formats)
-        whisper_success = run_whisper_pipeline(audio_path, hf_token, output_dir, formats)
-        combined_success = run_combined_pipeline(audio_path, hf_token, output_dir, formats)
+        granite_success = run_granite_pipeline(config)
+        whisper_success = run_whisper_pipeline(config)
+        combined_success = run_combined_pipeline(config)
         
         if not granite_success and not whisper_success and not combined_success:
             print("❌ All pipelines failed. No comparison results available.")
             return False
         
         print(f"\n✅ Comparison completed successfully!")
-        print(f"   Results saved to: {output_dir}/")
+        print(f"   Results saved to: {config.output_dir}/")
         
         # Show which pipelines succeeded
         succeeded = []
@@ -550,7 +521,8 @@ def main():
     args = parse_arguments()
     
     # Validate arguments
-    if not validate_arguments(args):
+    is_valid, formats = validate_arguments(args)
+    if not is_valid:
         sys.exit(1)
     
     # Get HuggingFace token
@@ -562,19 +534,26 @@ def main():
     if not create_output_directory(args.output_dir):
         sys.exit(1)
     
-    # Parse output formats
-    formats = [f.strip().lower() for f in args.formats.split(",")]
+    # Create shared configuration object
+    config = PipelineConfig(
+        audio_path=args.audio_file,
+        hf_token=hf_token,
+        output_dir=args.output_dir,
+        formats=formats,
+        num_speakers=args.num_speakers,
+        min_confidence=args.min_confidence
+    )
     
     # Show configuration
     print(f"\n📋 Configuration:")
-    print(f"   Audio file: {args.audio_file}")
+    print(f"   Audio file: {config.audio_path}")
     print(f"   Pipeline: {args.pipeline}")
-    print(f"   Output directory: {args.output_dir}")
-    print(f"   Output formats: {', '.join(formats)}")
+    print(f"   Output directory: {config.output_dir}")
+    print(f"   Output formats: {', '.join(config.formats)}")
     
     if args.pipeline == "combined":
-        print(f"   Number of speakers: {args.num_speakers}")
-        print(f"   Minimum confidence threshold: {args.min_confidence}")
+        print(f"   Number of speakers: {config.num_speakers}")
+        print(f"   Minimum confidence threshold: {config.min_confidence}")
     
     print()
     
@@ -583,23 +562,16 @@ def main():
     
     try:
         if args.pipeline == "granite":
-            success = run_granite_pipeline(args.audio_file, hf_token, args.output_dir, formats)
+            success = run_granite_pipeline(config)
             
         elif args.pipeline == "whisper":
-            success = run_whisper_pipeline(args.audio_file, hf_token, args.output_dir, formats)
+            success = run_whisper_pipeline(config)
             
         elif args.pipeline == "combined":
-            success = run_combined_pipeline(
-                args.audio_file,
-                hf_token,
-                args.output_dir,
-                formats,
-                args.num_speakers,
-                args.min_confidence
-            )
+            success = run_combined_pipeline(config)
             
         elif args.pipeline == "compare":
-            success = run_comparison_mode(args.audio_file, hf_token, args.output_dir, formats)
+            success = run_comparison_mode(config)
             
     except KeyboardInterrupt:
         print("\n\n⚠️  Operation cancelled by user.")
@@ -614,7 +586,7 @@ def main():
     # Final status
     if success:
         print(f"\n🎉 Processing completed successfully!")
-        print(f"   Check the output directory: {args.output_dir}")
+        print(f"   Check the output directory: {config.output_dir}")
     else:
         print(f"\n💥 Processing failed. Check the error messages above.")
         sys.exit(1)
