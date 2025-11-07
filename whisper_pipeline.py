@@ -93,7 +93,7 @@ class WhisperPipelineDiarizer:
         else:
             device_str = "cpu"
             # Prefer float16 on Apple Silicon for a good accuracy/speed balance (falls back if unsupported)
-            compute_type = "float16"
+            compute_type = "float32"
 
         # Balanced threading: avoid oversubscription by splitting cores across workers.
         total_cores = os.cpu_count() or 8
