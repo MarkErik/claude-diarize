@@ -150,7 +150,7 @@ class WhisperPipelineDiarizer:
         try:
             self.alignment_model = Wav2Vec2ForCTC.from_pretrained(
                 "facebook/wav2vec2-large-960h-lv60-self",
-                torch_dtype=torch.float16 if self.device == "mps" else torch.float32
+                dtype=torch.float16 if self.device == "mps" else torch.float32
             ).to(self.device)
         except Exception as e:
             print(f"Failed to load alignment model on {self.device}: {e}")
