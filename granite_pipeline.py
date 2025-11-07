@@ -184,10 +184,13 @@ class GraniteSpeechDiarizer:
             preprocessed_audio_path,
             num_speakers=2  # Specified for 2-speaker interviews
         )
-        
-        # Convert diarization to list of segments
+
+        # Expect pyannote.audio v3 DiarizeOutput: use the speaker_diarization Annotation
+        annotation = diarization.speaker_diarization
+
+        # Convert diarization annotation to list of segments
         speaker_segments = []
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
+        for turn, _, speaker in annotation.itertracks(yield_label=True):
             speaker_segments.append({
                 'start': turn.start,
                 'end': turn.end,
