@@ -1,6 +1,14 @@
 """
 Comparison test: Granite Speech vs Multi-Component Pipeline
 Focus: Maximum accuracy for 2-speaker interview diarization
+
+Installation:
+pip install torch transformers faster-whisper pyannote.audio librosa peft
+
+For pyannote.audio, you need to:
+1. Get HuggingFace token: https://huggingface.co/settings/tokens
+2. Accept model terms: https://huggingface.co/pyannote/speaker-diarization-3.1
+   and https://huggingface.co/pyannote/segmentation-3.0
 """
 
 import torch
@@ -25,9 +33,17 @@ class GraniteSpeechDiarizer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         
+        # Note: Installing peft for LoRA adapter support
+        try:
+            import peft
+        except ImportError:
+            print("Warning: peft not installed. Installing now...")
+            import subprocess
+            subprocess.check_call(["pip", "install", "peft"])
+        
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id,
-            torch_dtype=self.torch_dtype,
+            dtype=self.torch_dtype,  # Changed from torch_dtype
             low_cpu_mem_usage=True,
         ).to(self.device)
         
@@ -43,46 +59,75 @@ class GraniteSpeechDiarizer:
         import librosa
         
         # Load audio
-        audio, sr = librosa.load(audio_path, sr=16000)
+        audio, sr = librosa.load(audio_path, sr=16000, mono=True)
         
-        # Process with Granite
+        # Process audio input
         inputs = self.processor(
             audio, 
             sampling_rate=sr, 
             return_tensors="pt"
-        ).to(self.device)
-        
-        # Generate with diarization task
-        # Note: Check Granite docs for exact prompt format for diarization
-        predicted_ids = self.model.generate(
-            **inputs,
-            max_new_tokens=512,
-            num_beams=5,
-            task="diarize",  # Specify diarization task
         )
         
-        # Decode output
-        result = self.processor.batch_decode(
-            predicted_ids, 
-            skip_special_tokens=True
-        )[0]
+        # Move inputs to device
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
-        # Parse Granite output format (adjust based on actual format)
-        word_segments = self._parse_granite_output(result)
+        # Generate with specific task instruction
+        # Granite uses text prompts to specify tasks
+        # Check model card for exact format, trying common patterns:
         
-        return word_segments
+        # Method 1: Try with task in generate parameters
+        try:
+            with torch.no_grad():
+                predicted_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=2048,
+                    num_beams=5,
+                )
+            
+            # Decode output
+            result = self.processor.batch_decode(
+                predicted_ids, 
+                skip_special_tokens=False  # Keep special tokens to see format
+            )[0]
+            
+            print(f"Raw Granite output: {result[:500]}...")  # Debug output
+            
+            # Parse Granite output format
+            word_segments = self._parse_granite_output(result, audio, sr)
+            
+            return word_segments
+            
+        except Exception as e:
+            print(f"Error during generation: {e}")
+            raise
     
-    def _parse_granite_output(self, output: str) -> List[Dict]:
+    def _parse_granite_output(self, output: str, audio: np.ndarray, sr: int) -> List[Dict]:
         """
         Parse Granite's output format into word-level segments
-        This needs to be adjusted based on actual Granite output format
-        """
-        # Placeholder - actual parsing depends on Granite's output structure
-        # Expected format might be something like:
-        # "<speaker_0> [0.0-1.2] Hello </speaker_0> <speaker_1> [1.2-2.5] Hi there </speaker_1>"
         
+        Granite Speech outputs in a specific format with speaker labels and text.
+        This needs adjustment based on actual output inspection.
+        """
         segments = []
-        # TODO: Implement actual parsing based on Granite documentation
+        
+        # Granite may output in various formats, common patterns:
+        # Format 1: "<|speaker_0|> text <|speaker_1|> more text"
+        # Format 2: "[Speaker 0]: text\n[Speaker 1]: more text"
+        # Format 3: JSON-like structure
+        
+        # For now, create a basic parser and let user see the format
+        # They can adjust based on actual output
+        
+        print("Granite output format:")
+        print(output[:1000])
+        print("\n" + "="*80)
+        print("Note: Parsing needs to be customized based on Granite's actual output format")
+        print("Please check the output above and update _parse_granite_output method")
+        print("="*80 + "\n")
+        
+        # Placeholder: Return simple segments for now
+        # TODO: Implement proper parsing once format is known
+        
         return segments
 
 
@@ -121,7 +166,7 @@ class AccuratePipelineDiarizer:
         print("Loading pyannote diarization pipeline...")
         self.diarization_pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=self.hf_token
+            token=self.hf_token  # Changed from use_auth_token
         )
         
         if torch.cuda.is_available():
@@ -483,8 +528,8 @@ def run_comparison_test(audio_path: str, hf_token: str, output_dir: str = "resul
 
 if __name__ == "__main__":
     # Configuration
-    AUDIO_FILE = ""  # Replace with your audio file
-    HF_TOKEN = ""  # Get from https://huggingface.co/settings/tokens
+    AUDIO_FILE = "your_interview.wav"  # Replace with your audio file
+    HF_TOKEN = "your_huggingface_token"  # Get from https://huggingface.co/settings/tokens
     
     # Run comparison
     granite_results, pipeline_results = run_comparison_test(
