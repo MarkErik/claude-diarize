@@ -12,6 +12,7 @@ dependencies = [
     "peft>=0.17.1",
     "pyannote-audio>=4.0.1",
     "python-dotenv>=1.0.0",
+    "soundfile>=0.13.1",
     "torch>=2.9.0",
     "transformers>=4.57.1",
 ]

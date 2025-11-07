@@ -175,6 +175,10 @@ class WhisperPipelineDiarizer:
         - For extremely long audio (>2h), consider periodic checkpointing of intermediate JSON outputs to mitigate risk of interruption.
         """
         
+        # Step 0: Preprocess audio for consistency across all pipeline steps
+        print("Step 0: Preprocessing audio...")
+        preprocessed_audio_path = self._preprocess_audio_for_diarization(audio_path)
+        
         # Step 1: Transcribe with Whisper
         print("Step 1: Transcribing with Whisper...")
         # Accuracy-focused decoding parameters:
@@ -183,7 +187,7 @@ class WhisperPipelineDiarizer:
         # - condition_on_previous_text preserves context across long interviews without chunking.
         # NOTE: faster-whisper does not support 'batch_size' in transcribe(); removed.
         segments, info = self.whisper.transcribe(
-            audio_path,
+            preprocessed_audio_path,
             word_timestamps=True,
             language="en",  # Adjust as needed or set None for auto-detect
             beam_size=self.beam_size,
@@ -220,7 +224,7 @@ class WhisperPipelineDiarizer:
         # Step 2: Forced Alignment (if available)
         print("Step 2: Performing forced alignment...")
         transcript = " ".join([w['word'] for w in words_with_timestamps])
-        aligned_words = self._forced_alignment(audio_path, transcript)
+        aligned_words = self._forced_alignment(preprocessed_audio_path, transcript)
         
         # Save forced alignment results
         self._save_output(aligned_words, "whisper_forced_alignment.json")
@@ -231,7 +235,7 @@ class WhisperPipelineDiarizer:
         # Step 3: Diarization
         print("Step 3: Running speaker diarization...")
         diarization = self.diarization_pipeline(
-            audio_path,
+            preprocessed_audio_path,
             num_speakers=2  # Specified for 2-speaker interviews
         )
         
@@ -268,6 +272,41 @@ class WhisperPipelineDiarizer:
         print(f"  Saved final results: {len(final_segments)} words")
         
         return final_segments
+    
+    def _preprocess_audio_for_diarization(self, audio_path: str) -> str:
+        """
+        Preprocess audio file for pyannote diarization to avoid sample rate mismatches.
+        
+        Ensures audio is properly formatted with consistent sample rate and avoids
+        corrupted samples that can cause chunk extraction errors.
+        
+        Args:
+            audio_path: Path to original audio file
+            
+        Returns:
+            Path to preprocessed audio file (or original if preprocessing fails)
+        """
+        try:
+            import librosa
+            import soundfile as sf
+            
+            # Load audio and resample to 16kHz (pyannote's expected rate)
+            audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+            
+            # Create preprocessed output path
+            preprocessed_path = self.output_dir / "whisper-results" / "preprocessed_audio.wav"
+            preprocessed_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save with consistent format
+            sf.write(str(preprocessed_path), audio, 16000, subtype='PCM_16')
+            
+            print(f"  Preprocessed audio saved: {preprocessed_path}")
+            return str(preprocessed_path)
+            
+        except Exception as e:
+            print(f"Warning: Audio preprocessing failed: {e}")
+            print("  Falling back to original audio file")
+            return audio_path
     
     def _forced_alignment(self, audio_path: str, transcript: str) -> List[Dict]:
         """

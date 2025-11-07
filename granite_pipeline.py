@@ -145,8 +145,12 @@ class GraniteSpeechDiarizer:
         """
         import torchaudio
         
-        # Load audio - must be mono, 16kHz
-        wav, sr = torchaudio.load(audio_path, normalize=True)
+        # Step 0: Preprocess audio for consistency across all pipeline steps
+        print("Step 0: Preprocessing audio...")
+        preprocessed_audio_path = self._preprocess_audio_for_diarization(audio_path)
+        
+        # Load audio - must be mono, 16kHz (use preprocessed audio)
+        wav, sr = torchaudio.load(preprocessed_audio_path, normalize=True)
         if wav.shape[0] > 1:
             wav = wav.mean(dim=0, keepdim=True)  # Convert to mono
         if sr != 16000:
@@ -157,7 +161,7 @@ class GraniteSpeechDiarizer:
         
         # Step 1: Transcribe with Granite Speech
         print("Step 1: Transcribing with Granite Speech...")
-        transcript_text = self._transcribe_with_granite(wav, audio_path)
+        transcript_text = self._transcribe_with_granite(wav, preprocessed_audio_path)
         print(f"Transcript: {transcript_text[:200]}...")
         
         # Save raw transcription output
@@ -167,7 +171,7 @@ class GraniteSpeechDiarizer:
         
         # Step 2: Forced alignment for precise word timestamps
         print("Step 2: Performing forced alignment...")
-        words_with_timestamps = self._forced_alignment(audio_path, transcript_text)
+        words_with_timestamps = self._forced_alignment(preprocessed_audio_path, transcript_text)
         
         # Save forced alignment results
         self._save_output(words_with_timestamps, "granite_forced_alignment.json")
@@ -177,7 +181,7 @@ class GraniteSpeechDiarizer:
         # Step 3: Diarization with pyannote community-1
         print("Step 3: Running speaker diarization...")
         diarization = self.diarization_pipeline(
-            audio_path,
+            preprocessed_audio_path,
             num_speakers=2  # Specified for 2-speaker interviews
         )
         
@@ -298,6 +302,41 @@ class GraniteSpeechDiarizer:
         # Avoid forced cache clearing to prevent memory fragmentation
         
         return transcript_text.strip()
+    
+    def _preprocess_audio_for_diarization(self, audio_path: str) -> str:
+        """
+        Preprocess audio file for pyannote diarization to avoid sample rate mismatches.
+        
+        Ensures audio is properly formatted with consistent sample rate and avoids
+        corrupted samples that can cause chunk extraction errors.
+        
+        Args:
+            audio_path: Path to original audio file
+            
+        Returns:
+            Path to preprocessed audio file (or original if preprocessing fails)
+        """
+        try:
+            import librosa
+            import soundfile as sf
+            
+            # Load audio and resample to 16kHz (pyannote's expected rate)
+            audio, sr = librosa.load(audio_path, sr=16000, mono=True)
+            
+            # Create preprocessed output path
+            preprocessed_path = self.output_dir / "granite-results" / "preprocessed_audio.wav"
+            preprocessed_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save with consistent format
+            sf.write(str(preprocessed_path), audio, 16000, subtype='PCM_16')
+            
+            print(f"  Preprocessed audio saved: {preprocessed_path}")
+            return str(preprocessed_path)
+            
+        except Exception as e:
+            print(f"Warning: Audio preprocessing failed: {e}")
+            print("  Falling back to original audio file")
+            return audio_path
     
     def _forced_alignment(self, audio_path: str, transcript: str) -> List[Dict]:
         """
