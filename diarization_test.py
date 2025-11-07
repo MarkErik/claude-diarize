@@ -1,33 +1,4 @@
-    def _forced_alignment(self, audio_path: str, transcript: str) -> List[Dict]:
-        """
-        Use wav2vec2 for forced phoneme alignment to get precise word timestamps
-        Uses pre-loaded model to avoid memory leaks
-        """
-        try:
-            import librosa
-            import gc
-            
-            # Load audio
-            audio, sr = librosa.load(audio_path, sr=16000)
-            
-            # Process audio
-            inputs = self.alignment_processor(audio, sampling_rate=16000, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            
-            # Get logits
-            with torch.no_grad():
-                logits = self.alignment_model(**inputs).logits
-            
-            # Simple heuristic alignment based on audio duration
-            words = transcript.split()
-            words_with_timestamps = []
-            
-            audio_duration = len(audio) / sr
-            char_count = len(transcript)
-            
-            current_time = 0
-            for word in words:
-                word_duration = (len(word) / char_count) * audio_duration if char_count > 0 else 0."""
+"""
 Comparison test: Granite Speech vs Whisper Multi-Component Pipelines
 Focus: Maximum accuracy for 2-speaker interview diarization
 
@@ -542,7 +513,7 @@ class AccuratePipelineDiarizer:
         
         return final_segments
     
-    def _forced_alignment(self, audio_path: str, words: List[Dict]) -> List[Dict]:
+    def _forced_alignment(self, audio_path: str, transcript: str) -> List[Dict]:
         """
         Use wav2vec2 for forced phoneme alignment
         This refines word boundaries to be more accurate
@@ -587,6 +558,7 @@ class AccuratePipelineDiarizer:
             
             # Align words to audio frames
             # This is a simplified version - full MFA implementation is more complex
+            words = transcript.split()
             aligned_words = self._align_words_to_frames(words, logits, processor)
             
             # CRITICAL: Clear memory
@@ -600,8 +572,28 @@ class AccuratePipelineDiarizer:
             return aligned_words
             
         except Exception as e:
-            print(f"Forced alignment failed: {e}, using Whisper timestamps")
-            return words
+            print(f"Forced alignment failed: {e}, using simple timing")
+            # Fallback to simple timing
+            words = transcript.split()
+            import librosa
+            audio, sr = librosa.load(audio_path, sr=16000)
+            audio_duration = len(audio) / sr
+            
+            words_with_timestamps = []
+            for i, word in enumerate(words):
+                start_time = (i / len(words)) * audio_duration if len(words) > 0 else 0
+                end_time = ((i + 1) / len(words)) * audio_duration if len(words) > 0 else 0.1
+                words_with_timestamps.append({
+                    'word': word,
+                    'start': start_time,
+                    'end': end_time,
+                    'confidence': 0.7
+                })
+            
+            del audio
+            gc.collect()
+            
+            return words_with_timestamps
     
     def _align_words_to_frames(self, words: List[Dict], logits, processor) -> List[Dict]:
         """Align words to audio frames using CTC logits"""
@@ -890,8 +882,8 @@ def run_comparison_test(audio_path: str, hf_token: str, output_dir: str = "resul
 
 if __name__ == "__main__":
     # Configuration
-    AUDIO_FILE = "your_interview.wav"  # Replace with your audio file
-    HF_TOKEN = "your_huggingface_token"  # Get from https://huggingface.co/settings/tokens
+    AUDIO_FILE = ""  # Replace with your audio file
+    HF_TOKEN = ""  # Get from https://huggingface.co/settings/tokens
     
     # Run comparison
     granite_results, pipeline_results = run_comparison_test(
